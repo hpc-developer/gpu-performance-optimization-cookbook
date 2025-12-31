@@ -26,6 +26,36 @@ import nvtx
 import numpy as np
 import time
 
+# 尝试导入 GPU 计算库
+try:
+    import torch
+    TORCH_AVAILABLE = torch.cuda.is_available()
+    if TORCH_AVAILABLE:
+        torch.cuda.init()
+        DEVICE = torch.device('cuda')
+        print(f"✓ PyTorch 可用，使用 GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        TORCH_AVAILABLE = False
+        print("⚠ PyTorch 可用但 CUDA 不可用，将使用 CPU")
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("⚠ PyTorch 不可用")
+
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+    print(f"✓ CuPy 可用")
+except ImportError:
+    CUPY_AVAILABLE = False
+    print("⚠ CuPy 不可用")
+
+# 选择可用的 GPU 库
+USE_TORCH = TORCH_AVAILABLE
+USE_CUPY = CUPY_AVAILABLE and not TORCH_AVAILABLE  # 优先使用 PyTorch
+
+if not (USE_TORCH or USE_CUPY):
+    print("⚠ 警告：没有可用的 GPU 库，将使用 CPU 模拟（性能分析可能不准确）")
+
 def get_color(name):
     """颜色辅助函数"""
     colors = {
@@ -78,17 +108,36 @@ def bad_practice_frequent_allocation(size=1024, iterations=100):
             #   - 调用内存分配器
             #   - 可能触发内存碎片整理
             #   - CPU-GPU 同步开销
-            with nvtx.annotate(f"迭代 {i}: 分配内存", color=get_color("orange")):
-                data = np.random.rand(size, size).astype(np.float32)
+            with nvtx.annotate(f"迭代 {i}: 分配GPU内存", color=get_color("orange")):
+                if USE_TORCH:
+                    data = torch.randn(size, size, device=DEVICE)
+                    torch.cuda.synchronize()
+                elif USE_CUPY:
+                    data = cp.random.randn(size, size, dtype=cp.float32)
+                    cp.cuda.Stream.null.synchronize()
+                else:
+                    data = np.random.rand(size, size).astype(np.float32)
             
-            # 实际计算操作（这里用 sum 模拟）
-            with nvtx.annotate(f"迭代 {i}: 计算", color=get_color("yellow")):
-                result = np.sum(data)
+            # 实际计算操作（GPU矩阵乘法）
+            with nvtx.annotate(f"迭代 {i}: GPU计算", color=get_color("yellow")):
+                if USE_TORCH:
+                    result = torch.matmul(data, data)
+                    torch.cuda.synchronize()
+                elif USE_CUPY:
+                    result = cp.matmul(data, data)
+                    cp.cuda.Stream.null.synchronize()
+                else:
+                    result = np.sum(data)
             
             # ❌ 问题点 2: 立即释放内存
             # 释放操作也需要同步，增加开销
             # 频繁的分配-释放循环导致性能下降
-            del data
+            with nvtx.annotate(f"迭代 {i}: 释放GPU内存", color=get_color("red")):
+                del data
+                if USE_TORCH:
+                    torch.cuda.synchronize()
+                elif USE_CUPY:
+                    cp.cuda.Stream.null.synchronize()
 
 def good_practice_reuse_allocation(size=1024, iterations=100):
     """
@@ -125,21 +174,46 @@ def good_practice_reuse_allocation(size=1024, iterations=100):
         # ✅ 优化点 1: 预先分配内存
         # 在循环外一次性分配，只触发一次分配操作
         # 避免了循环中的分配开销
-        with nvtx.annotate("预分配内存", color=get_color("blue")):
-            data = np.empty((size, size), dtype=np.float32)
+        with nvtx.annotate("预分配GPU内存", color=get_color("blue")):
+            if USE_TORCH:
+                data = torch.empty(size, size, device=DEVICE)
+                torch.cuda.synchronize()
+            elif USE_CUPY:
+                data = cp.empty((size, size), dtype=cp.float32)
+                cp.cuda.Stream.null.synchronize()
+            else:
+                data = np.empty((size, size), dtype=np.float32)
         
         for i in range(iterations):
             # ✅ 优化点 2: 重用已分配的内存
             # 使用 data[:] = ... 填充数据，而不是创建新数组
             # 这样只需要一次分配，后续都是数据填充操作
-            with nvtx.annotate(f"迭代 {i}: 填充数据", color=get_color("orange")):
-                data[:] = np.random.rand(size, size).astype(np.float32)
+            with nvtx.annotate(f"迭代 {i}: 填充GPU数据", color=get_color("orange")):
+                if USE_TORCH:
+                    data[:] = torch.randn(size, size, device=DEVICE)
+                elif USE_CUPY:
+                    data[:] = cp.random.randn(size, size, dtype=cp.float32)
+                else:
+                    data[:] = np.random.rand(size, size).astype(np.float32)
             
-            # 实际计算操作
-            with nvtx.annotate(f"迭代 {i}: 计算", color=get_color("yellow")):
-                result = np.sum(data)
+            # 实际计算操作（GPU矩阵乘法）
+            with nvtx.annotate(f"迭代 {i}: GPU计算", color=get_color("yellow")):
+                if USE_TORCH:
+                    result = torch.matmul(data, data)
+                    torch.cuda.synchronize()
+                elif USE_CUPY:
+                    result = cp.matmul(data, data)
+                    cp.cuda.Stream.null.synchronize()
+                else:
+                    result = np.sum(data)
         
         # 注意：内存在整个函数结束后才释放，而不是每次迭代
+        with nvtx.annotate("释放GPU内存", color=get_color("green")):
+            del data
+            if USE_TORCH:
+                torch.cuda.synchronize()
+            elif USE_CUPY:
+                cp.cuda.Stream.null.synchronize()
 
 if __name__ == "__main__":
     print("GPU 内存分配性能分析示例\n")
@@ -158,5 +232,5 @@ if __name__ == "__main__":
     
     print(f"性能提升: {bad_time/good_time:.2f}x")
     print("\n使用 nsys profile 查看详细的内存分配时间线：")
-    print("nsys profile --trace=cuda,nvtx --cuda-memory-usage=true python example1_memory_allocation.py")
+    print("nsys profile --trace=cuda,nvtx --cuda-memory-usage=true --output=example1_memory_allocation.nsys-rep python example1_memory_allocation.py")
 

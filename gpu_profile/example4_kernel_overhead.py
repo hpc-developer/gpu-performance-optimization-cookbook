@@ -28,6 +28,36 @@ import nvtx
 import numpy as np
 import time
 
+# 尝试导入 GPU 计算库
+try:
+    import torch
+    TORCH_AVAILABLE = torch.cuda.is_available()
+    if TORCH_AVAILABLE:
+        torch.cuda.init()
+        DEVICE = torch.device('cuda')
+        print(f"✓ PyTorch 可用，使用 GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        TORCH_AVAILABLE = False
+        print("⚠ PyTorch 可用但 CUDA 不可用，将使用 CPU")
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("⚠ PyTorch 不可用")
+
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+    print(f"✓ CuPy 可用")
+except ImportError:
+    CUPY_AVAILABLE = False
+    print("⚠ CuPy 不可用")
+
+# 选择可用的 GPU 库
+USE_TORCH = TORCH_AVAILABLE
+USE_CUPY = CUPY_AVAILABLE and not TORCH_AVAILABLE  # 优先使用 PyTorch
+
+if not (USE_TORCH or USE_CUPY):
+    print("⚠ 警告：没有可用的 GPU 库，将使用 CPU 模拟（性能分析可能不准确）")
+
 def get_color(name):
     colors = {
         "red": (1.0, 0.0, 0.0),
@@ -82,19 +112,26 @@ def bad_practice_many_small_kernels(size=100, iterations=1000):
             # ❌ 问题点 1: 频繁启动小内核
             # 每次启动都有固定开销，与内核大小无关
             # 小内核的问题：启动开销可能 > 计算时间
-            with nvtx.annotate(f"小内核 {i}", color=get_color("orange")):
-                # 模拟内核启动开销（固定，与计算量无关）
+            with nvtx.annotate(f"小内核{i}", color=get_color("orange")):
                 # 实际中包括：
                 #   - 参数传递和验证：~0.01-0.1ms
                 #   - GPU 调度器调度：~0.01-0.05ms
                 #   - 上下文切换：~0.01-0.05ms
                 # 总计：~0.1ms（固定开销）
-                time.sleep(0.0001)  # 启动开销
-                
-                # 模拟实际计算时间（很小）
-                # 对于小内核，计算时间可能 < 启动开销
-                # 这导致效率极低
-                time.sleep(0.00005)  # 计算时间很短
+                if USE_TORCH:
+                    # 小矩阵乘法，计算量小，启动开销占比高
+                    a = torch.randn(size, size, device=DEVICE)
+                    b = torch.randn(size, size, device=DEVICE)
+                    c = torch.matmul(a, b)  # 小内核，启动开销占比高
+                    torch.cuda.synchronize()
+                elif USE_CUPY:
+                    a = cp.random.randn(size, size, dtype=cp.float32)
+                    b = cp.random.randn(size, size, dtype=cp.float32)
+                    c = cp.matmul(a, b)  # 小内核，启动开销占比高
+                    cp.cuda.Stream.null.synchronize()
+                else:
+                    time.sleep(0.0001)  # 启动开销
+                    time.sleep(0.00005)  # 计算时间很短
 
 def good_practice_few_large_kernels(size=100, iterations=1000):
     """
@@ -143,21 +180,28 @@ def good_practice_few_large_kernels(size=100, iterations=1000):
         num_batches = iterations // batch_size
         
         for batch in range(num_batches):
-            with nvtx.annotate(f"大内核批次 {batch}", color=get_color("blue")):
-                # 启动开销相同（~0.1ms），但现在处理 100 个元素
-                # 启动开销占比 = 0.1 / (0.1 + 100×0.05) = 0.1 / 5.1 ≈ 2%
-                # vs 小内核的 67%
-                time.sleep(0.0001)  # 启动开销（与单个小内核相同）
-                
-                # ✅ 优化点 2: 批量处理
-                # 在同一个内核中处理多个元素
-                # 利用 GPU 的并行能力（线程、块、网格）
-                # 实际中应该使用线程并行，而不是循环
-                for i in range(batch_size):
-                    with nvtx.annotate(f"处理元素 {batch*batch_size + i}", color=get_color("green")):
-                        # 实际中：每个线程处理一个元素
-                        # 使用 grid 和 block 并行，而不是循环
-                        time.sleep(0.00005)  # 计算时间
+            with nvtx.annotate(f"大内核批次{batch}", color=get_color("blue")):
+                # 启动开销相同（~0.1ms），但现在处理更多数据
+                # 启动开销占比低，效率高
+                if USE_TORCH:
+                    # 大矩阵乘法，计算量大，启动开销占比低
+                    a = torch.randn(size * 10, size * 10, device=DEVICE)
+                    b = torch.randn(size * 10, size * 10, device=DEVICE)
+                    c = torch.matmul(a, b)  # 大内核，启动开销占比低
+                    torch.cuda.synchronize()
+                elif USE_CUPY:
+                    a = cp.random.randn(size * 10, size * 10, dtype=cp.float32)
+                    b = cp.random.randn(size * 10, size * 10, dtype=cp.float32)
+                    c = cp.matmul(a, b)  # 大内核，启动开销占比低
+                    cp.cuda.Stream.null.synchronize()
+                else:
+                    time.sleep(0.0001)  # 启动开销（与单个小内核相同）
+                    # ✅ 优化点 2: 批量处理
+                    # 在同一个内核中处理多个元素
+                    # 利用 GPU 的并行能力（线程、块、网格）
+                    for i in range(batch_size):
+                        with nvtx.annotate(f"处理元素{batch*batch_size + i}", color=get_color("green")):
+                            time.sleep(0.00005)  # 计算时间
 
 def demonstrate_kernel_launch_overhead():
     """演示内核启动开销"""
@@ -167,16 +211,44 @@ def demonstrate_kernel_launch_overhead():
         # 小内核：启动开销占比高
         with nvtx.annotate("小内核示例", color=get_color("red")):
             with nvtx.annotate("启动开销", color=get_color("yellow")):
-                time.sleep(0.001)  # 启动开销
+                if USE_TORCH:
+                    a = torch.randn(64, 64, device=DEVICE)
+                    b = torch.randn(64, 64, device=DEVICE)
+                elif USE_CUPY:
+                    a = cp.random.randn(64, 64, dtype=cp.float32)
+                    b = cp.random.randn(64, 64, dtype=cp.float32)
+                else:
+                    time.sleep(0.001)  # 启动开销
             with nvtx.annotate("计算时间", color=get_color("blue")):
-                time.sleep(0.0005)  # 计算时间短
+                if USE_TORCH:
+                    c = torch.matmul(a, b)  # 小内核，计算时间短
+                    torch.cuda.synchronize()
+                elif USE_CUPY:
+                    c = cp.matmul(a, b)  # 小内核，计算时间短
+                    cp.cuda.Stream.null.synchronize()
+                else:
+                    time.sleep(0.0005)  # 计算时间短
         
         # 大内核：启动开销占比低
         with nvtx.annotate("大内核示例", color=get_color("green")):
             with nvtx.annotate("启动开销", color=get_color("yellow")):
-                time.sleep(0.001)  # 相同的启动开销
+                if USE_TORCH:
+                    a = torch.randn(1024, 1024, device=DEVICE)
+                    b = torch.randn(1024, 1024, device=DEVICE)
+                elif USE_CUPY:
+                    a = cp.random.randn(1024, 1024, dtype=cp.float32)
+                    b = cp.random.randn(1024, 1024, dtype=cp.float32)
+                else:
+                    time.sleep(0.001)  # 相同的启动开销
             with nvtx.annotate("计算时间", color=get_color("blue")):
-                time.sleep(0.01)  # 计算时间长，开销占比低
+                if USE_TORCH:
+                    c = torch.matmul(a, b)  # 大内核，计算时间长，开销占比低
+                    torch.cuda.synchronize()
+                elif USE_CUPY:
+                    c = cp.matmul(a, b)  # 大内核，计算时间长，开销占比低
+                    cp.cuda.Stream.null.synchronize()
+                else:
+                    time.sleep(0.01)  # 计算时间长，开销占比低
 
 if __name__ == "__main__":
     print("内核启动开销性能分析示例\n")
@@ -199,5 +271,5 @@ if __name__ == "__main__":
     demonstrate_kernel_launch_overhead()
     
     print("\n使用 nsys profile 查看内核启动时间线：")
-    print("nsys profile --trace=cuda,nvtx --sampling-frequency=1000 python example4_kernel_overhead.py")
+    print("nsys profile --trace=cuda,nvtx --sampling-frequency=1000 --output=example4_kernel_overhead.nsys-rep python example4_kernel_overhead.py")
 

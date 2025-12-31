@@ -28,6 +28,36 @@ import nvtx
 import numpy as np
 import time
 
+# 尝试导入 GPU 计算库
+try:
+    import torch
+    TORCH_AVAILABLE = torch.cuda.is_available()
+    if TORCH_AVAILABLE:
+        torch.cuda.init()
+        DEVICE = torch.device('cuda')
+        print(f"✓ PyTorch 可用，使用 GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        TORCH_AVAILABLE = False
+        print("⚠ PyTorch 可用但 CUDA 不可用，将使用 CPU")
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("⚠ PyTorch 不可用")
+
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+    print(f"✓ CuPy 可用")
+except ImportError:
+    CUPY_AVAILABLE = False
+    print("⚠ CuPy 不可用")
+
+# 选择可用的 GPU 库
+USE_TORCH = TORCH_AVAILABLE
+USE_CUPY = CUPY_AVAILABLE and not TORCH_AVAILABLE  # 优先使用 PyTorch
+
+if not (USE_TORCH or USE_CUPY):
+    print("⚠ 警告：没有可用的 GPU 库，将使用 CPU 模拟（性能分析可能不准确）")
+
 def get_color(name):
     colors = {
         "red": (1.0, 0.0, 0.0),
@@ -79,24 +109,38 @@ def bad_practice_frequent_sync(iterations=100):
         
         for i in range(iterations):
             # 启动异步 GPU 操作
-            with nvtx.annotate(f"迭代 {i}: 启动计算", color=get_color("blue")):
-                # 模拟异步 GPU 操作（实际中这是非阻塞的）
-                # GPU 可以在后台执行，CPU 可以继续做其他事情
-                time.sleep(0.001)
+            with nvtx.annotate(f"迭代{i}: 启动GPU计算", color=get_color("blue")):
+                if USE_TORCH:
+                    x = torch.randn(256, 256, device=DEVICE)
+                    y = torch.randn(256, 256, device=DEVICE)
+                    z = torch.matmul(x, y)  # 异步操作，不阻塞
+                elif USE_CUPY:
+                    x = cp.random.randn(256, 256, dtype=cp.float32)
+                    y = cp.random.randn(256, 256, dtype=cp.float32)
+                    z = cp.matmul(x, y)  # 异步操作，不阻塞
+                else:
+                    time.sleep(0.001)  # 模拟异步操作
             
             # ❌ 问题点 1: 立即同步等待
             # 同步操作会阻塞 CPU，等待 GPU 完成当前操作
             # 这打断了 GPU 流水线，无法并行处理多个操作
             # 如果 GPU 操作很快，同步开销可能比计算时间还长
-            with nvtx.annotate(f"迭代 {i}: 同步等待", color=get_color("red")):
-                # 模拟同步操作：CPU 阻塞，等待 GPU
+            with nvtx.annotate(f"迭代{i}: 同步等待", color=get_color("red")):
                 # 实际中 cudaDeviceSynchronize() 或 cudaStreamSynchronize()
                 # 同步时间 = GPU 执行时间 + 同步开销（~0.1-0.5ms）
-                time.sleep(0.002)  # 这里包括 GPU 执行时间 + 同步开销
+                if USE_TORCH:
+                    torch.cuda.synchronize()  # 阻塞等待GPU完成
+                elif USE_CUPY:
+                    cp.cuda.Stream.null.synchronize()  # 阻塞等待GPU完成
+                else:
+                    time.sleep(0.002)  # 模拟同步开销
             
             # 获取结果（同步后才能安全访问）
-            with nvtx.annotate(f"迭代 {i}: 获取结果", color=get_color("yellow")):
-                results.append(i)
+            with nvtx.annotate(f"迭代{i}: 获取结果", color=get_color("yellow")):
+                if USE_TORCH or USE_CUPY:
+                    results.append(z.sum().item() if USE_TORCH else float(cp.sum(z)))
+                else:
+                    results.append(i)
 
 def good_practice_deferred_sync(iterations=100):
     """
@@ -139,13 +183,24 @@ def good_practice_deferred_sync(iterations=100):
         # 连续启动，不等待完成
         # GPU 可以并行处理多个操作（如果有多个流）
         # CPU 可以继续做其他事情，不需要等待
-        with nvtx.annotate("批量启动计算", color=get_color("blue")):
+        with nvtx.annotate("批量启动GPU计算", color=get_color("blue")):
+            gpu_results = []
             for i in range(iterations):
-                with nvtx.annotate(f"启动任务 {i}", color=get_color("green")):
-                    # 模拟异步 GPU 操作（非阻塞）
+                with nvtx.annotate(f"启动任务{i}", color=get_color("green")):
                     # 实际中：cudaLaunchKernel() 立即返回
                     # GPU 在后台执行，CPU 可以继续
-                    time.sleep(0.001)
+                    if USE_TORCH:
+                        x = torch.randn(256, 256, device=DEVICE)
+                        y = torch.randn(256, 256, device=DEVICE)
+                        z = torch.matmul(x, y)  # 异步，不阻塞
+                        gpu_results.append(z)
+                    elif USE_CUPY:
+                        x = cp.random.randn(256, 256, dtype=cp.float32)
+                        y = cp.random.randn(256, 256, dtype=cp.float32)
+                        z = cp.matmul(x, y)  # 异步，不阻塞
+                        gpu_results.append(z)
+                    else:
+                        time.sleep(0.001)  # 模拟异步操作
         
         # ✅ 优化点 2: 只在最后同步一次
         # 让 GPU 有足够时间并行执行所有操作
@@ -154,13 +209,23 @@ def good_practice_deferred_sync(iterations=100):
         with nvtx.annotate("最终同步", color=get_color("orange")):
             # 实际中：cudaDeviceSynchronize() 或 cudaStreamSynchronize()
             # 等待所有操作完成
-            time.sleep(0.002)  # 只同步一次，而不是 100 次
+            if USE_TORCH:
+                torch.cuda.synchronize()  # 只同步一次
+            elif USE_CUPY:
+                cp.cuda.Stream.null.synchronize()  # 只同步一次
+            else:
+                time.sleep(0.002)  # 模拟同步
         
         # ✅ 优化点 3: 批量获取结果
         # 同步后一次性获取所有结果
         # 避免多次同步和多次数据传输
         with nvtx.annotate("批量获取结果", color=get_color("yellow")):
-            results = list(range(iterations))
+            if USE_TORCH:
+                results = [z.sum().item() for z in gpu_results]
+            elif USE_CUPY:
+                results = [float(cp.sum(z)) for z in gpu_results]
+            else:
+                results = list(range(iterations))
 
 def demonstrate_pipeline_stall():
     """演示流水线阻塞问题"""
@@ -168,24 +233,51 @@ def demonstrate_pipeline_stall():
     
     with nvtx.annotate("流水线示例", color=get_color("blue")):
         # 任务 1
-        with nvtx.annotate("任务 1: 数据传输", color=get_color("yellow")):
-            time.sleep(0.01)
+        with nvtx.annotate("任务1: CPU->GPU传输", color=get_color("yellow")):
+            if USE_TORCH:
+                cpu_data = torch.randn(512, 512)
+                gpu_data = cpu_data.to(DEVICE)
+            elif USE_CUPY:
+                cpu_data = np.random.randn(512, 512).astype(np.float32)
+                gpu_data = cp.asarray(cpu_data)
+            else:
+                time.sleep(0.01)
         
         # 不好的做法：立即同步
-        with nvtx.annotate("同步点（阻塞）", color=get_color("red")):
-            time.sleep(0.005)
+        with nvtx.annotate("同步点(阻塞)", color=get_color("red")):
+            if USE_TORCH:
+                torch.cuda.synchronize()
+            elif USE_CUPY:
+                cp.cuda.Stream.null.synchronize()
+            else:
+                time.sleep(0.005)
         
         # 任务 2
-        with nvtx.annotate("任务 2: 计算", color=get_color("green")):
-            time.sleep(0.01)
+        with nvtx.annotate("任务2: GPU计算", color=get_color("green")):
+            if USE_TORCH:
+                result = torch.matmul(gpu_data, gpu_data)
+            elif USE_CUPY:
+                result = cp.matmul(gpu_data, gpu_data)
+            else:
+                time.sleep(0.01)
         
         # 又同步
-        with nvtx.annotate("同步点（阻塞）", color=get_color("red")):
-            time.sleep(0.005)
+        with nvtx.annotate("同步点(阻塞)", color=get_color("red")):
+            if USE_TORCH:
+                torch.cuda.synchronize()
+            elif USE_CUPY:
+                cp.cuda.Stream.null.synchronize()
+            else:
+                time.sleep(0.005)
         
         # 任务 3
-        with nvtx.annotate("任务 3: 结果传输", color=get_color("yellow")):
-            time.sleep(0.01)
+        with nvtx.annotate("任务3: GPU->CPU传输", color=get_color("yellow")):
+            if USE_TORCH:
+                cpu_result = result.cpu()
+            elif USE_CUPY:
+                cpu_result = cp.asnumpy(result)
+            else:
+                time.sleep(0.01)
 
 if __name__ == "__main__":
     print("同步性能分析示例\n")
@@ -208,5 +300,5 @@ if __name__ == "__main__":
     demonstrate_pipeline_stall()
     
     print("\n使用 nsys profile 查看同步点：")
-    print("nsys profile --trace=cuda,nvtx --sampling-frequency=1000 python example3_synchronization.py")
+    print("nsys profile --trace=cuda,nvtx --sampling-frequency=1000 --output=example3_synchronization.nsys-rep python example3_synchronization.py")
 

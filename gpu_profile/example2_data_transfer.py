@@ -27,6 +27,36 @@ import nvtx
 import numpy as np
 import time
 
+# 尝试导入 GPU 计算库
+try:
+    import torch
+    TORCH_AVAILABLE = torch.cuda.is_available()
+    if TORCH_AVAILABLE:
+        torch.cuda.init()
+        DEVICE = torch.device('cuda')
+        print(f"✓ PyTorch 可用，使用 GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        TORCH_AVAILABLE = False
+        print("⚠ PyTorch 可用但 CUDA 不可用，将使用 CPU")
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("⚠ PyTorch 不可用")
+
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+    print(f"✓ CuPy 可用")
+except ImportError:
+    CUPY_AVAILABLE = False
+    print("⚠ CuPy 不可用")
+
+# 选择可用的 GPU 库
+USE_TORCH = TORCH_AVAILABLE
+USE_CUPY = CUPY_AVAILABLE and not TORCH_AVAILABLE  # 优先使用 PyTorch
+
+if not (USE_TORCH or USE_CUPY):
+    print("⚠ 警告：没有可用的 GPU 库，将使用 CPU 模拟（性能分析可能不准确）")
+
 def get_color(name):
     colors = {
         "red": (1.0, 0.0, 0.0),
@@ -78,27 +108,46 @@ def bad_practice_small_transfers(size=1000, iterations=100):
     with nvtx.annotate("频繁数据传输示例", color=get_color("red")):
         for i in range(iterations):
             # CPU 端准备数据
-            with nvtx.annotate(f"迭代 {i}: CPU 准备数据", color=get_color("yellow")):
+            with nvtx.annotate(f"迭代 {i}: CPU准备数据", color=get_color("yellow")):
                 cpu_data = np.random.rand(size).astype(np.float32)
             
             # ❌ 问题点 1: 频繁的小数据传输
             # 每次迭代都传输，固定开销占比高
             # 小传输（如 1KB）的效率通常 < 1%
             # 因为：固定开销（启动、同步）>> 实际传输时间
-            with nvtx.annotate(f"迭代 {i}: CPU->GPU 传输", color=get_color("red")):
-                # 模拟小数据传输：固定开销大，有效传输时间短
-                # 实际中，1KB 传输可能需要 0.5ms，但有效传输只需 0.001ms
-                time.sleep(0.001)  # 这里模拟总开销（固定开销 + 传输时间）
+            with nvtx.annotate(f"迭代 {i}: CPU->GPU传输", color=get_color("red")):
+                if USE_TORCH:
+                    gpu_data = torch.from_numpy(cpu_data).to(DEVICE)
+                    torch.cuda.synchronize()
+                elif USE_CUPY:
+                    gpu_data = cp.asarray(cpu_data)
+                    cp.cuda.Stream.null.synchronize()
+                else:
+                    time.sleep(0.001)  # 模拟传输
             
-            # GPU 计算（通常很快）
-            with nvtx.annotate(f"迭代 {i}: GPU 计算", color=get_color("blue")):
-                time.sleep(0.0005)  # 计算时间可能比传输时间还短
+            # GPU 计算（矩阵乘法）
+            with nvtx.annotate(f"迭代 {i}: GPU计算", color=get_color("blue")):
+                if USE_TORCH:
+                    result = torch.matmul(gpu_data.unsqueeze(0), gpu_data.unsqueeze(0).t())
+                    torch.cuda.synchronize()
+                elif USE_CUPY:
+                    result = cp.matmul(gpu_data.reshape(1, -1), gpu_data.reshape(-1, 1))
+                    cp.cuda.Stream.null.synchronize()
+                else:
+                    time.sleep(0.0005)  # 模拟计算
             
             # ❌ 问题点 2: 立即回传结果
             # 如果不需要立即使用结果，这是浪费
             # 阻塞 GPU 继续计算
-            with nvtx.annotate(f"迭代 {i}: GPU->CPU 传输", color=get_color("red")):
-                time.sleep(0.001)  # 回传也有同样的开销问题
+            with nvtx.annotate(f"迭代 {i}: GPU->CPU传输", color=get_color("red")):
+                if USE_TORCH:
+                    cpu_result = result.cpu().numpy()
+                    torch.cuda.synchronize()
+                elif USE_CUPY:
+                    cpu_result = cp.asnumpy(result)
+                    cp.cuda.Stream.null.synchronize()
+                else:
+                    time.sleep(0.001)  # 模拟回传
 
 def good_practice_batch_transfer(size=1000, iterations=100):
     """
@@ -145,21 +194,46 @@ def good_practice_batch_transfer(size=1000, iterations=100):
         # 大传输的效率高：固定开销相同，但有效传输时间占比高
         # 例如：100KB 传输，固定开销 0.5ms，传输时间 0.1ms
         # 效率 = 0.1 / 0.6 ≈ 16.7%（vs 小传输的 0.2%）
-        with nvtx.annotate("批量 CPU->GPU 传输", color=get_color("purple")):
-            time.sleep(0.01)  # 一次传输，总开销远小于多次小传输
+        with nvtx.annotate("批量CPU->GPU传输", color=get_color("purple")):
+            if USE_TORCH:
+                gpu_all_data = torch.from_numpy(all_data).to(DEVICE)
+                torch.cuda.synchronize()
+            elif USE_CUPY:
+                gpu_all_data = cp.asarray(all_data)
+                cp.cuda.Stream.null.synchronize()
+            else:
+                time.sleep(0.01)  # 模拟传输
         
         # ✅ 优化点 3: 批量处理
         # GPU 可以连续计算，不需要等待传输
         # 提高 GPU 利用率和吞吐量
-        with nvtx.annotate("批量 GPU 计算", color=get_color("blue")):
-            for i in range(iterations):
-                with nvtx.annotate(f"处理批次 {i}", color=get_color("green")):
-                    time.sleep(0.0005)
+        with nvtx.annotate("批量GPU计算", color=get_color("blue")):
+            if USE_TORCH:
+                for i in range(iterations):
+                    with nvtx.annotate(f"处理批次{i}", color=get_color("green")):
+                        result = torch.matmul(gpu_all_data[i:i+1], gpu_all_data[i:i+1].t())
+                torch.cuda.synchronize()
+            elif USE_CUPY:
+                for i in range(iterations):
+                    with nvtx.annotate(f"处理批次{i}", color=get_color("green")):
+                        result = cp.matmul(gpu_all_data[i:i+1], gpu_all_data[i:i+1].T)
+                cp.cuda.Stream.null.synchronize()
+            else:
+                for i in range(iterations):
+                    with nvtx.annotate(f"处理批次{i}", color=get_color("green")):
+                        time.sleep(0.0005)
         
         # 一次性传回结果（如果需要）
         # 如果不需要结果，可以完全避免回传
-        with nvtx.annotate("批量 GPU->CPU 传输", color=get_color("purple")):
-            time.sleep(0.01)
+        with nvtx.annotate("批量GPU->CPU传输", color=get_color("purple")):
+            if USE_TORCH:
+                cpu_results = gpu_all_data.cpu().numpy()
+                torch.cuda.synchronize()
+            elif USE_CUPY:
+                cpu_results = cp.asnumpy(gpu_all_data)
+                cp.cuda.Stream.null.synchronize()
+            else:
+                time.sleep(0.01)
 
 if __name__ == "__main__":
     print("CPU-GPU 数据传输性能分析示例\n")
@@ -178,5 +252,5 @@ if __name__ == "__main__":
     
     print(f"性能提升: {bad_time/good_time:.2f}x")
     print("\n使用 nsys profile 查看数据传输时间线：")
-    print("nsys profile --trace=cuda,nvtx,osrt python example2_data_transfer.py")
+    print("nsys profile --trace=cuda,nvtx,osrt --output=example2_data_transfer.nsys-rep python example2_data_transfer.py")
 

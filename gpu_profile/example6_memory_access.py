@@ -28,6 +28,36 @@ import nvtx
 import numpy as np
 import time
 
+# 尝试导入 GPU 计算库
+try:
+    import torch
+    TORCH_AVAILABLE = torch.cuda.is_available()
+    if TORCH_AVAILABLE:
+        torch.cuda.init()
+        DEVICE = torch.device('cuda')
+        print(f"✓ PyTorch 可用，使用 GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        TORCH_AVAILABLE = False
+        print("⚠ PyTorch 可用但 CUDA 不可用，将使用 CPU")
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("⚠ PyTorch 不可用")
+
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+    print(f"✓ CuPy 可用")
+except ImportError:
+    CUPY_AVAILABLE = False
+    print("⚠ CuPy 不可用")
+
+# 选择可用的 GPU 库
+USE_TORCH = TORCH_AVAILABLE
+USE_CUPY = CUPY_AVAILABLE and not TORCH_AVAILABLE  # 优先使用 PyTorch
+
+if not (USE_TORCH or USE_CUPY):
+    print("⚠ 警告：没有可用的 GPU 库，将使用 CPU 模拟（性能分析可能不准确）")
+
 def get_color(name):
     colors = {
         "red": (1.0, 0.0, 0.0),
@@ -75,7 +105,16 @@ def bad_practice_strided_access(size=1000):
     print("问题：按列访问导致跨步访问，缓存命中率低，带宽利用率低\n")
     
     with nvtx.annotate("跨步访问示例", color=get_color("red")):
-        data = np.random.rand(size, size).astype(np.float32)
+        # 创建GPU数据
+        with nvtx.annotate("创建GPU数据", color=get_color("blue")):
+            if USE_TORCH:
+                data = torch.randn(size, size, device=DEVICE)
+                torch.cuda.synchronize()
+            elif USE_CUPY:
+                data = cp.random.randn(size, size, dtype=cp.float32)
+                cp.cuda.Stream.null.synchronize()
+            else:
+                data = np.random.rand(size, size).astype(np.float32)
         
         # ❌ 问题点 1: 按列访问（跨步访问）
         # 数据在内存中是按行存储的：row0, row1, row2, ...
@@ -85,18 +124,26 @@ def bad_practice_strided_access(size=1000):
         #   - 缓存命中率低（每次访问可能都不在缓存中）
         #   - 无法合并访问（GPU 无法合并多个线程的访问）
         #   - 需要多次内存事务
-        with nvtx.annotate("按列访问（跨步）", color=get_color("orange")):
+        with nvtx.annotate("按列访问(跨步)", color=get_color("orange")):
             result = 0.0
-            for col in range(size):
-                with nvtx.annotate(f"列 {col}", color=get_color("yellow")):
+            for col in range(min(size, 100)):  # 限制迭代次数
+                with nvtx.annotate(f"列{col}", color=get_color("yellow")):
                     # 跨步访问：访问 data[:, col]
                     # 内存访问模式：data[0,col], data[1,col], data[2,col], ...
                     # 每次访问间隔 size 个元素
                     # 缓存不友好，带宽利用率低
-                    column_sum = np.sum(data[:, col])
-                    result += column_sum
-                    # 模拟跨步访问的延迟（比连续访问慢 5-10 倍）
-                    time.sleep(0.0001)  # 跨步访问延迟高
+                    if USE_TORCH:
+                        column_sum = torch.sum(data[:, col])
+                        result += column_sum.item()
+                        torch.cuda.synchronize()
+                    elif USE_CUPY:
+                        column_sum = cp.sum(data[:, col])
+                        result += float(column_sum)
+                        cp.cuda.Stream.null.synchronize()
+                    else:
+                        column_sum = np.sum(data[:, col])
+                        result += column_sum
+                        time.sleep(0.0001)  # 跨步访问延迟高
 
 def good_practice_contiguous_access(size=1000):
     """
@@ -135,7 +182,16 @@ def good_practice_contiguous_access(size=1000):
     print("优化：按行访问实现连续访问，缓存命中率高，带宽利用率高\n")
     
     with nvtx.annotate("连续访问示例", color=get_color("green")):
-        data = np.random.rand(size, size).astype(np.float32)
+        # 创建GPU数据
+        with nvtx.annotate("创建GPU数据", color=get_color("blue")):
+            if USE_TORCH:
+                data = torch.randn(size, size, device=DEVICE)
+                torch.cuda.synchronize()
+            elif USE_CUPY:
+                data = cp.random.randn(size, size, dtype=cp.float32)
+                cp.cuda.Stream.null.synchronize()
+            else:
+                data = np.random.rand(size, size).astype(np.float32)
         
         # ✅ 优化点 1: 按行访问（连续访问）
         # 数据在内存中是按行存储的：row0, row1, row2, ...
@@ -145,44 +201,77 @@ def good_practice_contiguous_access(size=1000):
         #   - 缓存命中率高（相邻元素可能在同一个缓存行中）
         #   - 可以合并访问（GPU 可以合并多个线程的访问）
         #   - 需要更少的内存事务
-        with nvtx.annotate("按行访问（连续）", color=get_color("blue")):
+        with nvtx.annotate("按行访问(连续)", color=get_color("blue")):
             result = 0.0
-            for row in range(size):
-                with nvtx.annotate(f"行 {row}", color=get_color("green")):
+            for row in range(min(size, 100)):  # 限制迭代次数
+                with nvtx.annotate(f"行{row}", color=get_color("green")):
                     # 连续访问：访问 data[row, :]
                     # 内存访问模式：data[row,0], data[row,1], data[row,2], ...
                     # 每次访问相邻元素
                     # 缓存友好，带宽利用率高
-                    row_sum = np.sum(data[row, :])
-                    result += row_sum
-                    # 连续访问延迟低（比跨步访问快 5-10 倍）
-                    time.sleep(0.00005)  # 连续访问延迟低
+                    if USE_TORCH:
+                        row_sum = torch.sum(data[row, :])
+                        result += row_sum.item()
+                        torch.cuda.synchronize()
+                    elif USE_CUPY:
+                        row_sum = cp.sum(data[row, :])
+                        result += float(row_sum)
+                        cp.cuda.Stream.null.synchronize()
+                    else:
+                        row_sum = np.sum(data[row, :])
+                        result += row_sum
+                        time.sleep(0.00005)  # 连续访问延迟低
 
 def demonstrate_cache_efficiency():
     """演示缓存效率差异"""
     print("=== 缓存效率演示 ===")
     
     size = 1000
-    data = np.random.rand(size, size).astype(np.float32)
-    
     with nvtx.annotate("缓存效率分析", color=get_color("blue")):
+        # 创建GPU数据
+        with nvtx.annotate("创建GPU数据", color=get_color("yellow")):
+            if USE_TORCH:
+                data = torch.randn(size, size, device=DEVICE)
+                torch.cuda.synchronize()
+            elif USE_CUPY:
+                data = cp.random.randn(size, size, dtype=cp.float32)
+                cp.cuda.Stream.null.synchronize()
+            else:
+                data = np.random.rand(size, size).astype(np.float32)
+        
         # 连续访问模式
-        with nvtx.annotate("连续访问（高缓存命中）", color=get_color("green")):
+        with nvtx.annotate("连续访问(高缓存命中)", color=get_color("green")):
             # 访问连续内存块
-            for i in range(0, size, 10):
-                with nvtx.annotate(f"块 {i//10}", color=get_color("blue")):
-                    chunk = data[i:i+10, :]
-                    np.sum(chunk)
-                    time.sleep(0.001)
+            for i in range(0, min(size, 100), 10):
+                with nvtx.annotate(f"块{i//10}", color=get_color("blue")):
+                    if USE_TORCH:
+                        chunk = data[i:i+10, :]
+                        result = torch.sum(chunk)
+                        torch.cuda.synchronize()
+                    elif USE_CUPY:
+                        chunk = data[i:i+10, :]
+                        result = cp.sum(chunk)
+                        cp.cuda.Stream.null.synchronize()
+                    else:
+                        chunk = data[i:i+10, :]
+                        np.sum(chunk)
+                        time.sleep(0.001)
         
         # 随机访问模式
-        with nvtx.annotate("随机访问（低缓存命中）", color=get_color("red")):
+        with nvtx.annotate("随机访问(低缓存命中)", color=get_color("red")):
             # 随机访问，缓存命中率低
-            indices = np.random.permutation(size)
-            for idx in indices[:100]:
-                with nvtx.annotate(f"随机索引 {idx}", color=get_color("orange")):
-                    np.sum(data[idx, :])
-                    time.sleep(0.002)  # 更慢的访问
+            indices = np.random.permutation(min(size, 100))
+            for idx in indices[:20]:
+                with nvtx.annotate(f"随机索引{idx}", color=get_color("orange")):
+                    if USE_TORCH:
+                        result = torch.sum(data[idx, :])
+                        torch.cuda.synchronize()
+                    elif USE_CUPY:
+                        result = cp.sum(data[idx, :])
+                        cp.cuda.Stream.null.synchronize()
+                    else:
+                        np.sum(data[idx, :])
+                        time.sleep(0.002)  # 更慢的访问
 
 if __name__ == "__main__":
     print("内存访问模式性能分析示例\n")
@@ -205,5 +294,5 @@ if __name__ == "__main__":
     demonstrate_cache_efficiency()
     
     print("\n使用 nsys profile 查看内存访问模式：")
-    print("nsys profile --trace=cuda,nvtx --cuda-memory-usage=true python example6_memory_access.py")
+    print("nsys profile --trace=cuda,nvtx --cuda-memory-usage=true --output=example6_memory_access.nsys-rep python example6_memory_access.py")
 

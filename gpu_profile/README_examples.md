@@ -807,7 +807,7 @@ nsys stats --report gputrace profile.nsys-rep
 ## 新手学习路径
 
 ### 阶段 1: 理解基础概念
-1. 运行 `nvtx_tag_demo.py` 了解 NVTX 标记
+1. 运行各个示例脚本（如 `example1_memory_allocation.py`）了解 NVTX 标记和 GPU 性能问题
 2. 运行各个示例，观察输出
 3. 理解每个问题的基本概念
 

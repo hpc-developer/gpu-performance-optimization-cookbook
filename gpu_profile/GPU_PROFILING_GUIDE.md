@@ -2,7 +2,7 @@
 
 ## 概述
 
-`nvtx_tag_demo.py` 现在包含实际的 GPU 计算，可用于真实的 CUDA 性能分析。
+示例脚本（如 `example1_memory_allocation.py`）包含实际的 GPU 计算，可用于真实的 CUDA 性能分析。
 
 ## 功能特性
 
@@ -25,7 +25,7 @@
 
 ```bash
 conda activate python3.12
-python nvtx_tag_demo.py
+python3 example1_memory_allocation.py
 ```
 
 ### 2. 使用 nsys profile 收集性能数据
@@ -36,7 +36,7 @@ nsys profile \
   --trace=cuda,nvtx \
   --cuda-memory-usage=true \
   --output=gpu_profile.nsys-rep \
-  python nvtx_tag_demo.py
+  python3 example1_memory_allocation.py
 
 # 详细分析（推荐）
 nsys profile \
@@ -46,7 +46,7 @@ nsys profile \
   --gpu-metrics-frequency=100 \
   --export=sqlite \
   --output=gpu_profile.nsys-rep \
-  python nvtx_tag_demo.py
+  python3 example1_memory_allocation.py
 ```
 
 ### 3. 查看分析结果
@@ -113,7 +113,7 @@ def gpu_matrix_multiply(size=1024):
 
 ```bash
 # 运行分析
-nsys profile --trace=cuda,nvtx --output=matmul_profile.nsys-rep python nvtx_tag_demo.py
+nsys profile --trace=cuda,nvtx --output=matmul_profile.nsys-rep python3 example1_memory_allocation.py
 
 # 在 GUI 中查看
 # 1. 找到 "GPU: 矩阵乘法" 标记
@@ -125,7 +125,7 @@ nsys profile --trace=cuda,nvtx --output=matmul_profile.nsys-rep python nvtx_tag_
 
 ```bash
 # 运行分析
-nsys profile --trace=cuda,nvtx --cuda-memory-usage=true --output=transfer_profile.nsys-rep python nvtx_tag_demo.py
+nsys profile --trace=cuda,nvtx --cuda-memory-usage=true --output=transfer_profile.nsys-rep python3 example2_data_transfer.py
 
 # 在 GUI 中查看
 # 1. 找到 "GPU: CPU->GPU 传输" 标记
@@ -137,7 +137,7 @@ nsys profile --trace=cuda,nvtx --cuda-memory-usage=true --output=transfer_profil
 
 ```bash
 # 运行分析
-nsys profile --trace=cuda,nvtx --cuda-memory-usage=true --output=training_profile.nsys-rep python nvtx_tag_demo.py
+nsys profile --trace=cuda,nvtx --cuda-memory-usage=true --output=training_profile.nsys-rep python3 example7_comprehensive.py
 
 # 在 GUI 中查看
 # 1. 查看 "训练循环" 的整体结构

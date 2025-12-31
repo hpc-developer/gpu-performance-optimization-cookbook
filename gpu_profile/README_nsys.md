@@ -5,15 +5,13 @@
 ## 文件说明
 
 ### 示例脚本
-- `example1_basic_profile.sh` - 基本性能分析
-- `example2_trace_options.sh` - 不同的跟踪选项（cuda, nvtx, osrt等）
-- `example3_memory_tracking.sh` - CUDA 内存跟踪
-- `example4_sampling_frequency.sh` - 采样频率设置
-- `example5_duration_control.sh` - 持续时间控制
-- `example6_export_formats.sh` - 导出不同格式（sqlite, json, chrome-trace）
-- `example7_stats_output.sh` - 统计信息输出
-- `example8_advanced_options.sh` - 高级选项
-- `example9_process_control.sh` - 进程控制（附加到运行中的进程）
+- `profile_example1_memory_allocation.sh` - GPU 内存分配问题分析
+- `profile_example2_data_transfer.sh` - CPU-GPU 数据传输瓶颈分析
+- `profile_example3_synchronization.sh` - GPU 同步问题分析
+- `profile_example4_kernel_overhead.sh` - GPU Kernel 启动开销分析
+- `profile_example5_load_imbalance.sh` - GPU 负载不均衡问题分析
+- `profile_example6_memory_access.sh` - GPU 内存访问模式问题分析
+- `profile_example7_comprehensive.sh` - 综合性能问题分析
 - `example10_comprehensive.sh` - 综合完整示例
 
 ### 运行脚本
@@ -29,13 +27,13 @@ bash run_all_examples.sh
 
 ### 2. 运行单个示例
 ```bash
-bash example1_basic_profile.sh
+bash profile_example1_memory_allocation.sh
 ```
 
 ### 3. 实际执行分析（需要取消注释）
 编辑示例脚本，取消注释实际执行命令，例如：
 ```bash
-nsys profile --trace=cuda,nvtx --output=nsys_profiles/basic_profile.nsys-rep python nvtx_tag_demo.py
+nsys profile --trace=cuda,nvtx --output=nsys_profiles/basic_profile.nsys-rep python3 example1_memory_allocation.py
 ```
 
 ## 常用命令速查

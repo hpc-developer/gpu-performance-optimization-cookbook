@@ -148,7 +148,7 @@ nsys profile \
   --trace=cuda,nvtx \
   --export=sqlite \
   --output=profile.nsys-rep \
-  python nvtx_tag_demo.py
+  python3 example1_memory_allocation.py
 
 # 2. 检查 SQLite 文件
 sqlite3 profile.sqlite ".tables"

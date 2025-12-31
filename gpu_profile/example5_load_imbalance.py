@@ -29,6 +29,36 @@ import numpy as np
 import time
 import random
 
+# 尝试导入 GPU 计算库
+try:
+    import torch
+    TORCH_AVAILABLE = torch.cuda.is_available()
+    if TORCH_AVAILABLE:
+        torch.cuda.init()
+        DEVICE = torch.device('cuda')
+        print(f"✓ PyTorch 可用，使用 GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        TORCH_AVAILABLE = False
+        print("⚠ PyTorch 可用但 CUDA 不可用，将使用 CPU")
+except ImportError:
+    TORCH_AVAILABLE = False
+    print("⚠ PyTorch 不可用")
+
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+    print(f"✓ CuPy 可用")
+except ImportError:
+    CUPY_AVAILABLE = False
+    print("⚠ CuPy 不可用")
+
+# 选择可用的 GPU 库
+USE_TORCH = TORCH_AVAILABLE
+USE_CUPY = CUPY_AVAILABLE and not TORCH_AVAILABLE  # 优先使用 PyTorch
+
+if not (USE_TORCH or USE_CUPY):
+    print("⚠ 警告：没有可用的 GPU 库，将使用 CPU 模拟（性能分析可能不准确）")
+
 def get_color(name):
     colors = {
         "red": (1.0, 0.0, 0.0),
@@ -79,17 +109,28 @@ def bad_practice_imbalanced_load(num_tasks=8):
     
     with nvtx.annotate("负载不均衡示例", color=get_color("red")):
         # ❌ 问题点 1: 任务负载差异很大
-        # 任务负载范围：0.05 到 0.3（6 倍差异）
+        # 任务负载范围：不同大小的矩阵（6 倍差异）
         # 这导致快的任务很快完成，但需要等待慢的任务
-        task_loads = [0.1, 0.15, 0.2, 0.05, 0.3, 0.1, 0.05, 0.05]  # 不均衡
+        task_sizes = [128, 192, 256, 64, 384, 128, 64, 64]  # 不均衡的矩阵大小
         
-        for i, load in enumerate(task_loads[:num_tasks]):
-            # 每个任务的工作量不同
+        for i, size in enumerate(task_sizes[:num_tasks]):
+            # 每个任务的工作量不同（不同大小的矩阵乘法）
             # 在并行环境中，这会导致负载不均衡
-            with nvtx.annotate(f"任务 {i} (负载: {load:.2f})", color=get_color("orange")):
-                # 模拟不同负载的任务
-                # 实际中可能是：不同数据大小、不同计算复杂度等
-                time.sleep(load)
+            load_factor = size / 128.0  # 归一化负载
+            with nvtx.annotate(f"任务{i}(负载:{load_factor:.2f},大小:{size})", color=get_color("orange")):
+                # 不同大小的GPU矩阵乘法，计算量不同
+                if USE_TORCH:
+                    a = torch.randn(size, size, device=DEVICE)
+                    b = torch.randn(size, size, device=DEVICE)
+                    c = torch.matmul(a, b)
+                    torch.cuda.synchronize()
+                elif USE_CUPY:
+                    a = cp.random.randn(size, size, dtype=cp.float32)
+                    b = cp.random.randn(size, size, dtype=cp.float32)
+                    c = cp.matmul(a, b)
+                    cp.cuda.Stream.null.synchronize()
+                else:
+                    time.sleep(load_factor * 0.1)  # 模拟不同负载
         
         # ❌ 问题点 2: 所有任务完成后才能继续
         # 总时间由最慢的任务决定
@@ -97,8 +138,13 @@ def bad_practice_imbalanced_load(num_tasks=8):
         with nvtx.annotate("等待所有任务完成", color=get_color("yellow")):
             # 最慢的任务决定了总时间
             # 如果任务负载不均衡，总时间远大于平均时间
-            max_load = max(task_loads[:num_tasks])
-            time.sleep(max_load * 0.1)
+            if USE_TORCH:
+                torch.cuda.synchronize()
+            elif USE_CUPY:
+                cp.cuda.Stream.null.synchronize()
+            else:
+                max_size = max(task_sizes[:num_tasks])
+                time.sleep(max_size / 128.0 * 0.1)
 
 def good_practice_balanced_load(num_tasks=8):
     """
@@ -139,40 +185,78 @@ def good_practice_balanced_load(num_tasks=8):
         #   - 预测任务执行时间
         #   - 动态调整任务分配
         #   - 使用工作窃取策略
-        total_load = 1.0
-        balanced_load = total_load / num_tasks
+        balanced_size = 256  # 所有任务使用相同大小的矩阵
         
         for i in range(num_tasks):
             # 每个任务负载相同，确保同时完成
-            with nvtx.annotate(f"任务 {i} (负载: {balanced_load:.2f})", color=get_color("blue")):
-                # 每个任务负载相同
+            with nvtx.annotate(f"任务{i}(负载:1.0,大小:{balanced_size})", color=get_color("blue")):
+                # 每个任务负载相同（相同大小的矩阵乘法）
                 # 在并行环境中，这确保所有资源同时完成
-                time.sleep(balanced_load)
+                if USE_TORCH:
+                    a = torch.randn(balanced_size, balanced_size, device=DEVICE)
+                    b = torch.randn(balanced_size, balanced_size, device=DEVICE)
+                    c = torch.matmul(a, b)
+                    torch.cuda.synchronize()
+                elif USE_CUPY:
+                    a = cp.random.randn(balanced_size, balanced_size, dtype=cp.float32)
+                    b = cp.random.randn(balanced_size, balanced_size, dtype=cp.float32)
+                    c = cp.matmul(a, b)
+                    cp.cuda.Stream.null.synchronize()
+                else:
+                    time.sleep(0.125)  # 相同负载
         
         # ✅ 优化点 2: 所有任务几乎同时完成
         # 没有等待时间，资源利用率高
         # 总时间 = 单个任务时间（而不是最慢任务时间）
         with nvtx.annotate("所有任务完成", color=get_color("green")):
-            time.sleep(0.01)
+            if USE_TORCH:
+                torch.cuda.synchronize()
+            elif USE_CUPY:
+                cp.cuda.Stream.null.synchronize()
+            else:
+                time.sleep(0.01)
 
 def demonstrate_work_stealing():
     """演示工作窃取策略"""
     print("=== 工作窃取策略演示 ===")
     
     with nvtx.annotate("工作窃取示例", color=get_color("purple")):
-        # 初始任务分配
-        tasks = [0.2, 0.3, 0.1, 0.15, 0.25]
+        # 初始任务分配（不同大小的任务）
+        task_sizes = [256, 384, 128, 192, 320]
         
         with nvtx.annotate("初始分配", color=get_color("yellow")):
-            for i, task in enumerate(tasks):
-                with nvtx.annotate(f"工作单元 {i}", color=get_color("orange")):
-                    time.sleep(task * 0.1)
+            for i, size in enumerate(task_sizes):
+                with nvtx.annotate(f"工作单元{i}(大小:{size})", color=get_color("orange")):
+                    if USE_TORCH:
+                        a = torch.randn(size, size, device=DEVICE)
+                        b = torch.randn(size, size, device=DEVICE)
+                        c = torch.matmul(a, b)
+                        torch.cuda.synchronize()
+                    elif USE_CUPY:
+                        a = cp.random.randn(size, size, dtype=cp.float32)
+                        b = cp.random.randn(size, size, dtype=cp.float32)
+                        c = cp.matmul(a, b)
+                        cp.cuda.Stream.null.synchronize()
+                    else:
+                        time.sleep(size / 128.0 * 0.1)
         
         # 快速完成的工作单元可以"窃取"其他单元的工作
         with nvtx.annotate("工作窃取", color=get_color("green")):
-            # 模拟负载重新分配
+            # 模拟负载重新分配（将大任务拆分）
             with nvtx.annotate("重新分配负载", color=get_color("blue")):
-                time.sleep(0.05)
+                if USE_TORCH:
+                    # 将大任务拆分为小任务
+                    a = torch.randn(128, 128, device=DEVICE)
+                    b = torch.randn(128, 128, device=DEVICE)
+                    c = torch.matmul(a, b)
+                    torch.cuda.synchronize()
+                elif USE_CUPY:
+                    a = cp.random.randn(128, 128, dtype=cp.float32)
+                    b = cp.random.randn(128, 128, dtype=cp.float32)
+                    c = cp.matmul(a, b)
+                    cp.cuda.Stream.null.synchronize()
+                else:
+                    time.sleep(0.05)
 
 if __name__ == "__main__":
     print("负载均衡性能分析示例\n")
@@ -195,5 +279,5 @@ if __name__ == "__main__":
     demonstrate_work_stealing()
     
     print("\n使用 nsys profile 查看负载分布：")
-    print("nsys profile --trace=cuda,nvtx --sampling-frequency=1000 python example5_load_imbalance.py")
+    print("nsys profile --trace=cuda,nvtx --sampling-frequency=1000 --output=example5_load_imbalance.nsys-rep python example5_load_imbalance.py")
 
