@@ -1,4 +1,4 @@
-# Nsight Systems Cookbook
+# GPU Performance Optimization Cookbook
 
 一个全面的 GPU 性能分析和 CUDA 优化实践指南，涵盖从基础到高级的 GPU 编程技巧和性能分析方法。
 
