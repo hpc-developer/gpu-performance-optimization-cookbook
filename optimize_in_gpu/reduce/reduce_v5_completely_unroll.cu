@@ -1,9 +1,7 @@
 #include <bits/stdc++.h>
-#include <cuda.h>
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
-#include <time.h>
-#include <sys/time.h>
+#include <stdio.h>
 
 // 每个线程块中的线程数
 #define THREADS_PER_BLOCK 256

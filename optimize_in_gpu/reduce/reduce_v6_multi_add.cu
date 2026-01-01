@@ -1,9 +1,7 @@
 #include <bits/stdc++.h>
-#include <cuda.h>
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
-#include <time.h>
-#include <sys/time.h>
+#include <stdio.h>
 
 // 每个线程块中的线程数
 #define THREADS_PER_BLOCK 256
@@ -34,7 +32,7 @@ __device__ void warp_reduce(volatile float* cache, unsigned int thread_idx){
  * 这种优化特别适合处理大量数据的情况
  */
 template <unsigned int block_size, int elements_per_thread>
-__global__ void reduce6(float *device_input, float *device_output, unsigned int num_elements){
+__global__ void reduce6(float *device_input, float *device_output){
     // 共享内存数组，大小等于线程块大小
     __shared__ float shared_data[block_size];
 
@@ -151,7 +149,7 @@ int main(){
     dim3 block_dim(THREADS_PER_BLOCK, 1);  // 线程块维度
     
     // 启动 GPU 内核（使用模板参数指定线程块大小和每个线程处理的元素数）
-    reduce6<THREADS_PER_BLOCK, elements_per_thread><<<grid_dim, block_dim>>>(device_input_data, device_output_data, num_elements);
+    reduce6<THREADS_PER_BLOCK, elements_per_thread><<<grid_dim, block_dim>>>(device_input_data, device_output_data);
 
     // 将结果从设备内存复制回主机内存
     cudaMemcpy(host_output_data, device_output_data, num_blocks * sizeof(float), cudaMemcpyDeviceToHost);

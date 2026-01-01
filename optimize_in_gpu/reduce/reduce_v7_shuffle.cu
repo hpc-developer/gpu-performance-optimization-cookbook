@@ -1,9 +1,7 @@
 #include <bits/stdc++.h>
-#include <cuda.h>
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
-#include <time.h>
-#include <sys/time.h>
+#include <stdio.h>
 
 // 每个线程块中的线程数
 #define THREADS_PER_BLOCK 256
@@ -52,7 +50,7 @@ __device__ __forceinline__ float warp_reduce_sum(float sum) {
  * - 寄存器访问比共享内存快
  */
 template <unsigned int block_size, int elements_per_thread>
-__global__ void reduce7(float *device_input, float *device_output, unsigned int num_elements){
+__global__ void reduce7(float *device_input, float *device_output){
     // 使用寄存器存储每个线程的部分和
     float sum = 0;
 
@@ -158,7 +156,7 @@ int main(){
     // 多次迭代执行内核，用于性能测试
     int num_iterations = 2000;
     for(int iteration_idx = 0; iteration_idx < num_iterations; iteration_idx++){
-        reduce7<THREADS_PER_BLOCK, elements_per_thread><<<grid_dim, block_dim>>>(device_input_data, device_output_data, num_elements);
+        reduce7<THREADS_PER_BLOCK, elements_per_thread><<<grid_dim, block_dim>>>(device_input_data, device_output_data);
     }
 
     // 将结果从设备内存复制回主机内存
